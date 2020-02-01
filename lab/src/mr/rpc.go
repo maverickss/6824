@@ -21,3 +21,35 @@ type ExampleReply struct {
 
 // Add your RPC definitions here.
 
+type ReqMsgType int
+type ReplyMsgType int
+
+const (
+	GetJob ReqMsgType = iota
+	AckWorkDone
+)
+
+const (
+	Ack ReplyMsgType = iota
+	MapJobType
+	ReduceJobType
+	WaitType
+	ExitType
+	UnknownType
+)
+
+type ReduceJobData struct {
+	DataLocation string
+}
+
+type ReqArgs struct {
+	Type  ReqMsgType
+	Index int
+}
+
+type Reply struct {
+	Type      ReplyMsgType
+	Index     int
+	Filenames []string
+	ReduceNum int
+}

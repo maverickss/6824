@@ -1,10 +1,25 @@
 package mr
 
-import "fmt"
-import "log"
-import "net/rpc"
-import "hash/fnv"
+import (
+	"bufio"
+	"fmt"
+	"hash/fnv"
+	"io"
+	"io/ioutil"
+	"log"
+	"net/rpc"
+	"os"
+	"sort"
+	"time"
+)
 
+// for sorting by key.
+type ByKey []KeyValue
+
+// for sorting by key.
+func (a ByKey) Len() int           { return len(a) }
+func (a ByKey) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
+func (a ByKey) Less(i, j int) bool { return a[i].Key < a[j].Key }
 
 //
 // Map functions return a slice of KeyValue.
@@ -24,7 +39,6 @@ func ihash(key string) int {
 	return int(h.Sum32() & 0x7fffffff)
 }
 
-
 //
 // main/mrworker.go calls this function.
 //
@@ -35,7 +49,110 @@ func Worker(mapf func(string, string) []KeyValue,
 
 	// uncomment to send the Example RPC to the master.
 	// CallExample()
+	Call(mapf, reducef)
+}
 
+func Call(mapf func(string, string) []KeyValue,
+	reducef func(string, []string) string) {
+	for {
+		time.Sleep(time.Second)
+		args := ReqArgs{
+			Type: GetJob,
+		}
+		reply := Reply{}
+		ok := call("Master.Handler", &args, &reply)
+		if !ok {
+			continue
+		}
+		switch reply.Type {
+		case MapJobType:
+			fmt.Printf("Get a map job, index: %d, filenames: %v\n", reply.Index, reply.Filenames)
+			intermediates := make([][]KeyValue, reply.ReduceNum)
+			for i := 0; i < reply.ReduceNum; i++ {
+				intermediates[i] = make([]KeyValue, 0)
+			}
+			for _, f := range reply.Filenames {
+				file, err := os.Open(f)
+				if err != nil {
+					return
+				}
+				content, err := ioutil.ReadAll(file)
+				if err != nil {
+					return
+				}
+				kva := mapf(f, string(content))
+				for _, kv := range kva {
+					hash := ihash(kv.Key) % reply.ReduceNum
+					kvl := intermediates[hash]
+					kvl = append(kvl, kv)
+					intermediates[hash] = kvl
+				}
+			}
+			for i := 0; i < reply.ReduceNum; i++ {
+				imName := fmt.Sprintf("mr-%v-%v", reply.Index, i)
+				ofile, _ := os.Create(imName)
+				kva := intermediates[i]
+				for _, kv := range kva {
+					fmt.Fprintf(ofile, "%v %v\n", kv.Key, kv.Value)
+				}
+				ofile.Close()
+			}
+			doneArgs := ReqArgs{
+				Type:  AckWorkDone,
+				Index: reply.Index,
+			}
+			doneReply := Reply{}
+			call("Master.Handler", &doneArgs, &doneReply)
+		case ReduceJobType:
+			fmt.Printf("Get a reduce job, index: %d, filenames: %v\n", reply.Index, reply.Filenames)
+			index := reply.Index
+			intermediate := make([]KeyValue, 0)
+			for _, f := range reply.Filenames {
+				file, _ := os.Open(f)
+				buf := bufio.NewReader(file)
+				for {
+					line, err := buf.ReadString('\n')
+					if err != nil || io.EOF == err {
+						break
+					}
+					kv := KeyValue{}
+					fmt.Sscanf(line, "%v %v", &kv.Key, &kv.Value)
+					intermediate = append(intermediate, kv)
+				}
+			}
+			sort.Sort(ByKey(intermediate))
+			oname := fmt.Sprintf("mr-out-%v", index)
+			ofile, _ := os.Create(oname)
+			i := 0
+			for i < len(intermediate) {
+				j := i + 1
+				for j < len(intermediate) && intermediate[j].Key == intermediate[i].Key {
+					j++
+				}
+				values := []string{}
+				for k := i; k < j; k++ {
+					values = append(values, intermediate[k].Value)
+				}
+				output := reducef(intermediate[i].Key, values)
+
+				// this is the correct format for each line of Reduce output.
+				fmt.Fprintf(ofile, "%v %v\n", intermediate[i].Key, output)
+
+				i = j
+			}
+			ofile.Close()
+			doneArgs := ReqArgs{
+				Type:  AckWorkDone,
+				Index: reply.Index,
+			}
+			doneReply := Reply{}
+			call("Master.Handler", &doneArgs, &doneReply)
+		case WaitType:
+			continue
+		case ExitType:
+			return
+		}
+	}
 }
 
 //
